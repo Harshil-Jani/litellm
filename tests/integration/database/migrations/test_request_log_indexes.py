@@ -48,6 +48,29 @@ CALL_ID_INDEX: Final = "LiteLLM_SpendLogs_litellm_call_id_idx"
 PARTITIONED_PARENT_ERROR: Final = 'cannot create index on partitioned table "LiteLLM_SpendLogs" concurrently'
 ORIGINAL_MIGRATION_SQL: Final = MappingProxyType(
     {
+        "20250510142544_add_session_id_index_spend_logs": (
+            'CREATE INDEX IF NOT EXISTS "LiteLLM_SpendLogs_session_id_idx" '
+            'ON "LiteLLM_SpendLogs"("session_id");\n'
+        ),
+        "20260226120000_add_spend_log_tool_index": (
+            'CREATE TABLE IF NOT EXISTS "LiteLLM_SpendLogToolIndex" (\n'
+            '    "request_id" TEXT NOT NULL,\n'
+            '    "tool_name" TEXT NOT NULL,\n'
+            '    "start_time" TIMESTAMP(3) NOT NULL,\n'
+            '\n'
+            '    CONSTRAINT "LiteLLM_SpendLogToolIndex_pkey" PRIMARY KEY ("request_id","tool_name")\n'
+            ');\n'
+            'CREATE INDEX IF NOT EXISTS "LiteLLM_SpendLogToolIndex_tool_name_start_time_idx" '
+            'ON "LiteLLM_SpendLogToolIndex"("tool_name", "start_time");\n'
+        ),
+        "20260228100000_add_spend_logs_composite_index": (
+            'CREATE INDEX IF NOT EXISTS "LiteLLM_SpendLogs_startTime_request_id_idx" '
+            'ON "LiteLLM_SpendLogs"("startTime", "request_id");\n'
+        ),
+        "20260724000000_add_spend_log_tool_index_start_time_idx": (
+            'CREATE INDEX IF NOT EXISTS "LiteLLM_SpendLogToolIndex_start_time_idx" '
+            'ON "LiteLLM_SpendLogToolIndex"("start_time");\n'
+        ),
         API_KEY_INDEX_MIGRATION: (
             "-- CreateIndex\n"
             'CREATE INDEX IF NOT EXISTS "LiteLLM_SpendLogs_api_key_startTime_idx" '
@@ -89,8 +112,8 @@ def _migrate_deploy(database_url: str, schema: Path) -> "subprocess.CompletedPro
 
 
 def _release_layout(prisma_dir: Path, before: str) -> Path:
-    """The shipped migrations older than `before`, with the two index migrations written
-    the way the releases that shipped them did: the Prisma layout of a proxy on that release."""
+    """The shipped migrations older than `before`, with index migrations written the way
+    the releases that shipped them did: the Prisma layout of a proxy on that release."""
     (prisma_dir / "migrations").mkdir(parents=True)
     shutil.copy(PACKAGE / "schema.prisma", prisma_dir / "schema.prisma")
     for migration in sorted((PACKAGE / "migrations").iterdir()):
