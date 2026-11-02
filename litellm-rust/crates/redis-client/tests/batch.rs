@@ -40,6 +40,7 @@ fn observed(server: &RedisDeployment) -> (RedisClient, Arc<RoundTrips>) {
         timeouts: Timeouts::default(),
         breaker: None,
         events: Some(trips.clone()),
+        health_check: None,
     })
     .unwrap();
     (client, trips)
