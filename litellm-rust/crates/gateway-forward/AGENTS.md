@@ -10,6 +10,20 @@
 - Pooled upstream connections are retired well before Python's keep-alive timeout, so a request never lands on a connection Python is closing
 - WebSocket is the one protocol switch Python serves. Upgrades are relayed as raw bytes after the 101 and drained on shutdown
 
+## Environment
+
+`Settings` reads only these variables, and only when `LITELLM_FORWARD_UPSTREAM` is set. The Python supervisor in `litellm/proxy/rust_forward/` sets every one of them from the values Python actually runs with, so all of them are required and a missing or invalid one fails startup naming it. The crate never reads Python's own settings (`HOST`, `PORT`, `KEEPALIVE_TIMEOUT`, `GRACEFUL_SHUTDOWN_TIMEOUT`) and keeps no copy of Python's defaults, since Python can get those values from CLI flags the environment never shows
+
+| Variable | Meaning |
+|---|---|
+| `LITELLM_FORWARD_UPSTREAM` | Python's loopback origin, e.g. `http://127.0.0.1:53211` |
+| `LITELLM_FORWARD_HOST` | public bind host |
+| `LITELLM_FORWARD_PORT` | public bind port |
+| `LITELLM_FORWARD_UPSTREAM_KEEPALIVE` | seconds uvicorn keeps an idle connection open. Pooled connections are retired at half of it |
+| `LITELLM_FORWARD_SHUTDOWN_DRAIN` | seconds to drain on shutdown, already including Python's graceful timeout and teardown headroom |
+
 ## Tests
 
-Test through real sockets with `tests/support`, never `oneshot`. `Gateway` runs the forwarder on a listener like production, `recording` is a well-behaved upstream that captures what Python would receive, and `raw_upstream` and `Raw` drive bytes by hand for framing, timing and disconnects a real server would not produce. `tests/roundtrip.rs` checks the forwarding invariant for generated requests and responses. Add a protocol edge case there or as a focused test next to its neighbors
+Test through real sockets with `tests/support`, never `oneshot`. `Gateway` runs the forwarder on a listener like production, `recording` is a well-behaved upstream that captures what Python would receive, and `raw_upstream` and `Raw` drive bytes by hand for framing, timing and disconnects a real server would not produce. Waits measured in minutes use paused tokio time instead of real sleeps
+
+The forwarder sees HTTP/1.1 messages, not routes, so the tests are split into one file per traffic shape uvicorn can emit: `exchange` (plain request and response), `slow_head` (minutes before response headers), `stream` (incremental response bodies), `idle_stream` (long-lived streams that go quiet), `upload`, `download`, `websocket`, `client_identity`, `lifecycle` (disconnects, pooling, shutdown) and `roundtrip` (the forwarding invariant for generated messages). A new route never gets its own test. Add its behavior to the shape it already has, and when it needs a wire behavior none of the files covers, add a new shape file for it
