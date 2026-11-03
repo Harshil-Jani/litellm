@@ -35,6 +35,7 @@ def test_settings_project_caller_configuration_without_resolving_a_model(monkeyp
     monkeypatch.setattr(litellm, "reasoning_auto_summary", True)
     monkeypatch.setattr(litellm, "request_timeout", 1800)
     monkeypatch.setattr(litellm, "request_timeout_explicitly_set", True)
+    monkeypatch.setattr(litellm, "include_cost_in_streaming_usage", "true")
 
     projected: Final = messages_host.settings({"drop_params": "true", "additional_drop_params": ["metadata.user_id"]})
 
@@ -43,6 +44,7 @@ def test_settings_project_caller_configuration_without_resolving_a_model(monkeyp
         "reasoning_auto_summary": True,
         "additional_drop_params": ("metadata.user_id",),
         "request_timeout": 1800.0,
+        "include_cost_in_streaming_usage": True,
     }
 
 
