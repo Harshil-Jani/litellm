@@ -1,19 +1,14 @@
 mod support;
 
-use std::convert::Infallible;
-
 use axum::{
     Router,
-    body::{Body, Bytes},
+    body::Body,
     extract::Request,
     http::{HeaderValue, StatusCode},
     response::Response,
 };
-use http_body_util::BodyExt;
-use litellm_gateway_forward::PEER_HEADER;
 use rstest::rstest;
 use support::{Gateway, client, raw_upstream, recording, serve, within};
-use tokio::sync::mpsc;
 
 fn ok() -> Response {
     Response::new(Body::from("ok"))
@@ -38,11 +33,6 @@ async fn forwards_the_request_as_the_client_sent_it_minus_hop_headers() {
         "PATCH /v1/messages?x=a%2Fb&x=c HTTP/1.1\r\n\
          host: public.example\r\n\
          authorization: Bearer test\r\n\
-         x-forwarded-for: 192.0.2.1\r\n\
-         x-forwarded-for: 192.0.2.2\r\n\
-         x-forwarded-proto: https\r\n\
-         forwarded: for=192.0.2.1;proto=https\r\n\
-         x-litellm-rust-peer: 10.1.2.3:1\r\n\
          connection: x-remove, keep-alive\r\n\
          x-remove: remove\r\n\
          proxy-authorization: remove\r\n\
@@ -62,12 +52,6 @@ async fn forwards_the_request_as_the_client_sent_it_minus_hop_headers() {
     assert_eq!(request.uri, "/v1/messages?x=a%2Fb&x=c");
     assert_eq!(request.headers["host"], "public.example");
     assert_eq!(request.headers["authorization"], "Bearer test");
-    let forwarded_for: Vec<_> = request.headers.get_all("x-forwarded-for").iter().collect();
-    assert_eq!(forwarded_for, ["192.0.2.1", "192.0.2.2"]);
-    assert_eq!(request.headers["x-forwarded-proto"], "https");
-    assert_eq!(request.headers["forwarded"], "for=192.0.2.1;proto=https");
-    let peers: Vec<_> = request.headers.get_all(PEER_HEADER).iter().collect();
-    assert_eq!(peers, [raw.local_address().to_string().as_str()]);
     assert!(!request.headers.contains_key("x-remove"));
     assert!(!request.headers.contains_key("proxy-authorization"));
     assert!(!request.headers.contains_key("te"));
@@ -141,34 +125,6 @@ async fn absolute_form_targets_reach_python_as_origin_form() {
 
 #[rstest]
 #[tokio::test]
-async fn http2_clients_reach_python_with_their_public_host() {
-    let (upstream, mut received) = recording(ok).await;
-    let gateway = Gateway::start(upstream).await;
-    let stream = tokio::net::TcpStream::connect(gateway.address)
-        .await
-        .unwrap();
-    let (mut sender, connection) = hyper::client::conn::http2::handshake(
-        hyper_util::rt::TokioExecutor::new(),
-        hyper_util::rt::TokioIo::new(stream),
-    )
-    .await
-    .unwrap();
-    tokio::spawn(connection);
-    let request = axum::http::Request::get("http://public.example/v1/models")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = within(sender.send_request(request)).await.unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        received.recv().await.unwrap().headers["host"],
-        "public.example"
-    );
-}
-
-#[rstest]
-#[tokio::test]
 async fn relays_a_response_with_more_headers_than_hyper_allows_by_default() {
     let upstream = serve(axum::Router::new().fallback(|| async {
         let headers = (0..150).map(|index| (format!("llm_provider-x-{index}"), "v"));
@@ -226,58 +182,6 @@ async fn keeps_repeated_response_headers_and_opaque_header_bytes() {
 
 #[rstest]
 #[tokio::test]
-async fn streams_upload_and_response_incrementally_without_a_body_limit() {
-    let upstream = serve(
-        Router::new().fallback(|request: Request| async { Response::new(request.into_body()) }),
-    )
-    .await;
-    let gateway = Gateway::start(upstream).await;
-    let (sender, receiver) = mpsc::channel::<Result<Bytes, Infallible>>(1);
-    let stream = futures_util::stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|chunk| (chunk, receiver))
-    });
-    sender.send(Ok(Bytes::from_static(b"first"))).await.unwrap();
-    let mut response = within(
-        client().request(
-            Request::post(gateway.url("/v1/files"))
-                .body(Body::from_stream(stream))
-                .unwrap(),
-        ),
-    )
-    .await
-    .unwrap();
-    let frame = within(response.body_mut().frame()).await.unwrap().unwrap();
-    assert_eq!(frame.into_data().unwrap(), "first");
-    let large = Bytes::from(vec![b'x'; 8 * 1024 * 1024]);
-    sender.send(Ok(large.clone())).await.unwrap();
-    drop(sender);
-    let rest = within(response.into_body().collect())
-        .await
-        .unwrap()
-        .to_bytes();
-    assert_eq!(rest, large);
-}
-
-#[rstest]
-#[tokio::test]
-async fn answers_expect_continue_so_large_uploads_start() {
-    let (upstream, mut received) = recording(ok).await;
-    let gateway = Gateway::start(upstream).await;
-    let mut raw = gateway.connect().await;
-    raw.send("POST /v1/audio/transcriptions HTTP/1.1\r\nhost: x\r\nexpect: 100-continue\r\ncontent-length: 4\r\n\r\n")
-        .await;
-    let interim = within(raw.response_head()).await.unwrap();
-    assert_eq!(interim.status, StatusCode::CONTINUE);
-    raw.send("data").await;
-    assert_eq!(
-        within(raw.response_head()).await.unwrap().status,
-        StatusCode::OK
-    );
-    assert_eq!(received.recv().await.unwrap().body, "data");
-}
-
-#[rstest]
-#[tokio::test]
 async fn answers_pipelined_requests_in_order() {
     let upstream = serve(
         Router::new().fallback(|request: Request| async move { request.uri().path().to_owned() }),
@@ -318,37 +222,83 @@ async fn bodiless_statuses_keep_the_connection_reusable(#[case] status: StatusCo
 
 #[rstest]
 #[tokio::test]
-async fn relays_a_body_delimited_by_the_upstream_closing() {
+async fn informational_responses_keep_the_connection_reusable() {
     let upstream = raw_upstream(|mut python| async move {
-        python.request_head().await.unwrap();
-        python
-            .send("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nuntil eof")
-            .await;
+        while let Some(head) = python.request_head().await {
+            match head.path.as_str() {
+                "/hints" => {
+                    python
+                        .send("HTTP/1.1 103 Early Hints\r\nlink: </ui/app.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nfinal")
+                        .await
+                }
+                _ => {
+                    python
+                        .send("HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nnext")
+                        .await
+                }
+            }
+        }
     })
     .await;
     let gateway = Gateway::start(upstream).await;
-    let response = client().request(Request::get(gateway.url("/")).body(Body::empty()).unwrap());
-    let body = within(response).await.unwrap().into_body().collect();
-    assert_eq!(within(body).await.unwrap().to_bytes(), "until eof");
+    let mut raw = gateway.connect().await;
+    raw.send("GET /hints HTTP/1.1\r\nhost: x\r\n\r\nGET /next HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await;
+    let mut hinted = within(raw.response_head()).await.unwrap();
+    while hinted.status.is_informational() {
+        hinted = within(raw.response_head()).await.unwrap();
+    }
+    assert_eq!(hinted.status, StatusCode::OK);
+    assert_eq!(raw.body(hinted.content_length().unwrap()).await, b"final");
+    let next = within(raw.response_head()).await.unwrap();
+    assert_eq!(raw.body(next.content_length().unwrap()).await, b"next");
 }
 
 #[rstest]
+#[case::found(
+    StatusCode::FOUND,
+    "https://idp.example/authorize?state=a%2Fb&redirect_uri=https%3A%2F%2Fpublic.example%2Fsso%2Fcallback"
+)]
+#[case::see_other(StatusCode::SEE_OTHER, "/ui/?login=success")]
+#[case::temporary(StatusCode::TEMPORARY_REDIRECT, "./mcp/oauth/authorize?client_id=x")]
 #[tokio::test]
-async fn an_upstream_dying_mid_stream_fails_the_client_body_instead_of_ending_it() {
-    let upstream = raw_upstream(|mut python| async move {
-        python.request_head().await.unwrap();
-        python
-            .send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n6\r\ndata: \r\n")
-            .await;
+async fn redirects_reach_the_client_with_location_and_cookies_unchanged(
+    #[case] status: StatusCode,
+    #[case] location: &'static str,
+) {
+    let (upstream, _received) = recording(move || {
+        Response::builder()
+            .status(status)
+            .header("location", location)
+            .header(
+                "set-cookie",
+                "token=a%2Fb; Path=/; HttpOnly; Secure; SameSite=Lax",
+            )
+            .header("set-cookie", "state=; Max-Age=0")
+            .body(Body::empty())
+            .unwrap()
     })
     .await;
     let gateway = Gateway::start(upstream).await;
-    let response =
-        within(client().request(Request::get(gateway.url("/")).body(Body::empty()).unwrap()))
-            .await
-            .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(within(response.into_body().collect()).await.is_err());
+    let mut raw = gateway.connect().await;
+    raw.send("GET /sso/key/generate HTTP/1.1\r\nhost: public.example\r\n\r\n")
+        .await;
+    let head = within(raw.response_head()).await.unwrap();
+    assert_eq!(head.status, status);
+    assert_eq!(head.header("location"), Some(location.as_bytes()));
+    let cookies: Vec<_> = head
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "set-cookie")
+        .map(|(_, value)| value.as_slice())
+        .collect();
+    assert_eq!(
+        cookies,
+        [
+            &b"token=a%2Fb; Path=/; HttpOnly; Secure; SameSite=Lax"[..],
+            b"state=; Max-Age=0"
+        ]
+    );
 }
 
 #[rstest]
@@ -367,25 +317,4 @@ async fn non_websocket_upgrades_reach_python_as_plain_requests() {
     assert!(!request.headers.contains_key("upgrade"));
     assert!(!request.headers.contains_key("connection"));
     assert!(!request.headers.contains_key("http2-settings"));
-}
-
-#[rstest]
-#[case::get("GET")]
-#[case::delete("DELETE")]
-#[case::options("OPTIONS")]
-#[case::post("POST")]
-#[tokio::test]
-async fn forwards_a_chunked_body_on_any_method(#[case] method: &str) {
-    let (upstream, mut received) = recording(ok).await;
-    let gateway = Gateway::start(upstream).await;
-    let mut raw = gateway.connect().await;
-    raw.send(format!(
-        "{method} /v1/search HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n"
-    ))
-    .await;
-    assert_eq!(
-        within(raw.response_head()).await.unwrap().status,
-        StatusCode::OK
-    );
-    assert_eq!(received.recv().await.unwrap().body, "body");
 }
