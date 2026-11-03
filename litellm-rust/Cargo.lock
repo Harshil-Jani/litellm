@@ -3865,6 +3865,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "envy",
  "futures-util",
  "http-body-util",
  "httparse",
@@ -3872,6 +3873,7 @@ dependencies = [
  "hyper-util",
  "proptest",
  "rstest",
+ "serde",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",

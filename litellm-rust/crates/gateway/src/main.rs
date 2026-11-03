@@ -10,7 +10,7 @@ use serde_json::json;
 
 mod settings;
 
-use settings::{Settings, UiSettings};
+use settings::{LogSettings, Settings, UiSettings};
 
 struct StderrSink {
     level: Level,
@@ -41,24 +41,13 @@ impl Sink for StderrSink {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if let Some(upstream) = std::env::var_os("LITELLM_FORWARD_UPSTREAM") {
-        let settings: settings::ForwardSettings = settings::from_iter(std::env::vars_os())?;
+    if let Some(forward) = litellm_gateway_forward::Settings::from_env()? {
+        let log: LogSettings = settings::from_iter(std::env::vars_os())?;
         Logger::new(StderrSink {
-            level: settings.log_level(),
+            level: log.log_level(),
         })
         .install_global()?;
-        let forward = litellm_gateway_forward::Forward::new(
-            &upstream
-                .into_string()
-                .map_err(|_| "invalid upstream encoding")?,
-            settings.upstream_keepalive(),
-        )?;
-        let listener =
-            tokio::net::TcpListener::bind((settings.host.as_str(), settings.port)).await?;
-        tracing::info!(address = %listener.local_addr()?, "forwarding gateway listening");
-        forward
-            .serve(listener, shutdown_signal(), settings.shutdown_drain())
-            .await?;
+        litellm_gateway_forward::run(forward, shutdown_signal()).await?;
         return Ok(());
     }
     let settings: Settings = settings::from_iter(std::env::vars_os())?;

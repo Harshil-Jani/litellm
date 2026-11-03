@@ -8,8 +8,10 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+envy = "0.4.2"
 hyper = { version = "1", features = ["http1"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
+serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -23,5 +25,5 @@ httparse = "1"
 hyper = { version = "1", features = ["client", "http2"] }
 proptest.workspace = true
 rstest.workspace = true
-tokio = { workspace = true, features = ["io-util", "sync"] }
+tokio = { workspace = true, features = ["io-util", "sync", "test-util"] }
 tokio-tungstenite.workspace = true
